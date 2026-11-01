@@ -262,10 +262,15 @@ body.game-immersive #toast{top:max(14px,env(safe-area-inset-top))!important}
 .public-room-row button{white-space:nowrap}
 @media(max-width:620px){.menu-card:first-child .menu-actions{grid-template-columns:1fr 1fr}.menu-card:first-child .menu-actions button:last-child{grid-column:1/-1}}
 
+#back{padding:6px 12px;font-size:14px;border:1px solid #6b3a4a;border-radius:11px;background:linear-gradient(#5a2434,#341320);color:#ffe9ee;box-shadow:inset 0 1px #ffffff22,0 3px 9px #0007}
+#exitDlg{position:fixed;inset:0;z-index:60;background:rgba(3,6,16,.72);display:flex;align-items:center;justify-content:center;padding:16px}
+#exitDlg .box{background:#121b33;border:1px solid #3a4a8f;border-radius:16px;padding:20px;max-width:340px;width:100%;text-align:center;box-shadow:0 18px 50px #000a}
+#exitDlg p{margin:0 0 6px;font-weight:700}#exitDlg small{display:block;margin-bottom:14px}
+#exitDlg .row{display:flex;gap:10px;justify-content:center;flex-wrap:wrap}
 </style>
 </head>
 <body>
-<header><h1>🚀 المحتال</h1><div id="st">جاهز</div><div class="header-actions"><button id="fs" type="button" aria-label="تكبير الشاشة">تكبير الشاشة</button><button id="mu">🔊</button></div></header>
+<header><h1>🚀 المحتال</h1><div id="st">جاهز</div><div class="header-actions"><button id="back" type="button" hidden>↩ رجوع</button><button id="fs" type="button" aria-label="تكبير الشاشة">تكبير الشاشة</button><button id="mu">🔊</button></div></header>
 <div id="wrap"><div id="rotateHint"><div class="phone">📱</div><strong>لفّ موبايلك بالعرض</strong><span>اللعبة مصممة للعب الأفقي. دوّر الشاشة لتظهر الخريطة وأزرار التحكم بشكل كامل.</span></div><canvas id="cv" width="800" height="500"></canvas><div id="joy"><div id="knob"></div></div>
 <div id="bar"><button id="bt" class="t" hidden>مهمة</button><button id="bs" class="k" hidden>تخريب</button><button id="bl" class="k" hidden>أضواء</button><button id="bk" class="k" hidden>قتل</button><button id="br" class="r" hidden>بلّغ</button></div><div id="toast"></div><div id="ov"></div></div>
 <script>
@@ -463,6 +468,14 @@ function scanPublicRooms(list,msg,nameInput){
   });
 }
 
+let hist=false;
+function askExit(){
+  if(!R||$('exitDlg'))return;
+  const d=h('div');d.id='exitDlg';const b=h('div',null,'box');
+  b.append(h('p','ترجع للقائمة الرئيسية؟'),h('small',R.local?'رح تنتهي المباراة الحالية.':(R.isHost?'انت منشئ الغرفة، فرح تنتهي المباراة عند كل اللاعبين.':'رح تطلع من الغرفة.')));
+  const row=h('div',null,'row'),stay=h('button','كمّل اللعب','',()=>d.remove()),out=h('button','رجوع للقائمة','k',()=>{d.remove();leaveRoom()});
+  row.append(stay,out);b.append(row);d.append(b);d.onclick=e=>{if(e.target===d)d.remove()};document.body.append(d);
+}
 function leaveRoom(){if(R&&R.close)R.close();R=null;G=null;peers=[];BOTS=[];joined=false;room='';$('st').textContent='جاهز';$('bar').querySelectorAll('button').forEach(b=>{b.hidden=true});lobby()}
 function lobby(){
   ov.className='';ov.replaceChildren();
@@ -920,6 +933,8 @@ let lastT=performance.now(),DT=1;
 function tick(){
   const nowT=performance.now();DT=Math.min(3,Math.max(.25,(nowT-lastT)/16.667));lastT=nowT;
   try{
+  $('back').hidden=!R;
+  if(R&&!hist){hist=true;try{history.pushState({im:1},'')}catch(e){}}if(!R)hist=false;
   const portraitMobile=matchMedia('(max-width:700px) and (orientation:portrait)').matches;
   document.body.classList.toggle('need-landscape',!!(portraitMobile&&G&&G.phase==='play'));
   if(R&&R.local)botTick();
@@ -938,7 +953,7 @@ const cp=e=>{const r=cv.getBoundingClientRect();return{x:(e.clientX-r.left)/r.wi
 cv.addEventListener('pointerdown',e=>{ptr=cp(e);cv.setPointerCapture(e.pointerId)});
 cv.addEventListener('pointermove',e=>{if(ptr)ptr=cp(e)});
 ['pointerup','pointercancel'].forEach(t=>cv.addEventListener(t,()=>{ptr=null}));
-addEventListener('keydown',e=>{K[e.code]=true});addEventListener('blur',()=>{for(const k in K)K[k]=false});
+addEventListener('keydown',e=>{K[e.code]=true;if(e.code==='Escape')askExit()});addEventListener('popstate',()=>{if(R){askExit();try{history.pushState({im:1},'')}catch(e){}}});$('back').onclick=askExit;addEventListener('blur',()=>{for(const k in K)K[k]=false});
 addEventListener('keyup',e=>{K[e.code]=false});
 function resize(){const r=cv.getBoundingClientRect();VW=cv.width=Math.max(300,Math.round(r.width));VH=cv.height=Math.max(300,Math.round(r.height));Z=Math.max(.75,Math.min(1.15,VW/650))}
 addEventListener('resize',resize);addEventListener('orientationchange',()=>setTimeout(resize,250));if(window.ResizeObserver)new ResizeObserver(resize).observe(cv);
