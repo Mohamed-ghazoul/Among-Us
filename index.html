@@ -237,6 +237,8 @@ body.game-immersive #toast{top:max(14px,env(safe-area-inset-top))!important}
 .task-board .task-action{min-height:46px;min-width:145px}
 .task-board{overscroll-behavior:contain}
 @media(max-width:520px){.task-window{max-height:94dvh}.task-board{gap:9px}.task-board button{padding:9px 12px}}
+
+.public-room-list{display:grid;gap:8px;margin-top:10px;width:100%}.public-room-row{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:9px 11px;border:1px solid #344766;border-radius:10px;background:rgba(7,16,34,.72)}.public-room-info{font-size:13px;color:#e6efff}.public-room-row button{min-width:86px;padding:8px 12px}.public-room-row button:disabled{opacity:.5;cursor:not-allowed}
 </style>
 </head>
 <body>
@@ -301,7 +303,7 @@ const TY=ST.map((_,i)=>i%12);
 const STARS=Array.from({length:320},()=>[Math.random()*2400-300,Math.random()*1900-300,Math.random()*2+.5]);
 const cv=document.getElementById('cv'),cx=cv.getContext('2d'),ov=document.getElementById('ov');
 const $=id=>document.getElementById(id);
-let R=null,peers=[],G=null,joined=false,my={x:865*SCALE,y:710*SCALE},nick='',killCd=0,BOTS=[],soloRole='c',ptr=null;const K={};let VW=800,VH=500,Z=1;const joy={x:0,y:0};let shake=0,flash=0,mute=false,AC=null,sabCd=0,darkCd=0,soloN=6;const FX=[];const LP={};let voteNodes={};
+let R=null,peers=[],G=null,joined=false,my={x:865*SCALE,y:710*SCALE},nick='',killCd=0,BOTS=[],soloRole='c',ptr=null;const K={};let VW=800,VH=500,Z=1;const joy={x:0,y:0};let shake=0,flash=0,mute=false,AC=null,sabCd=0,darkCd=0,soloN=6,lastPresenceAt=0;const FX=[];const LP={};let voteNodes={};
 function snd(f,d,t,v){if(mute)return;try{AC=AC||new(window.AudioContext||window.webkitAudioContext)();const o=AC.createOscillator(),g=AC.createGain();o.type=t||'sine';o.frequency.value=f;g.gain.value=v||.08;g.gain.exponentialRampToValueAtTime(.0001,AC.currentTime+d);o.connect(g);g.connect(AC.destination);o.start();o.stop(AC.currentTime+d)}catch(e){}}
 const sfx={task:()=>{snd(660,.12);setTimeout(()=>snd(880,.18),110)},kill:()=>snd(110,.4,'sawtooth',.15),meet:()=>[500,400,500,400].forEach((f,k)=>setTimeout(()=>snd(f,.2,'square',.07),k*220)),win:()=>[523,659,784,1046].forEach((f,k)=>setTimeout(()=>snd(f,.25),k*150)),lose:()=>[400,330,260,200].forEach((f,k)=>setTimeout(()=>snd(f,.3,'sawtooth',.08),k*200))};
 sfx.sab=()=>snd(180,.35,'square',.1);
@@ -378,7 +380,7 @@ function startNet(host,code,ok,fail,peerId){
       hc.on('error',()=>failOnce('تعذر الانضمام إلى الغرفة'));
       hc.on('close',()=>{$('st').textContent='انقطع الاتصال بالمضيف'})}});
   if(host)pr.on('connection',c=>{
-    c.on('open',()=>{if((G&&G.phase!=='end')||Object.keys(conns).length>=9){try{c.send({t:'full'});setTimeout(()=>c.close(),120)}catch(e){c.close()}return}conns[c.peer]=c;pres[c.peer]={};pub()});
+    c.on('open',()=>{if((G&&G.phase!=='end')||Object.keys(conns).length>=11){try{c.send({t:'full'});setTimeout(()=>c.close(),120)}catch(e){c.close()}return}conns[c.peer]=c;pres[c.peer]={};pub()});
     c.on('data',m=>{if(m.t==='e')bc(m.k,m.d,c.peer);else if(m.t==='p')setP(c.peer,m.p)});
     c.on('close',()=>{delete conns[c.peer];delete pres[c.peer];pub()})});
   return net;
@@ -402,6 +404,38 @@ function findPublicRoom(msg,slot=1){
   const code='PUBLIC-'+slot,peerId='impostor-public-'+slot;
   R=startNet(false,code,()=>{room='عامة '+slot;joined=true;R.presence({n:nick,c:Math.floor(Math.random()*COL.length),x:865*SCALE,y:710*SCALE});$('st').textContent='متصل ✓';wire();lobby()},e=>{R=null;if(e.includes('غير موجودة')||e.includes('تعذر')||e.includes('الاتصال')||e.includes('بدأت')||e.includes('ممتلئة'))findPublicRoom(msg,slot+1);else msg.textContent=e},peerId);
 }
+
+function scanPublicRooms(list,msg,nameInput){
+  list.replaceChildren();msg.textContent='نفحص الغرف العامة المتاحة…';
+  if(typeof Peer==='undefined'){msg.textContent='خدمة الاتصال غير محمّلة. حدّث الصفحة وحاول مجدداً.';return}
+  const probes=Array.from({length:PUBLIC_SLOTS},(_,i)=>i+1);
+  Promise.all(probes.map(slot=>new Promise(resolve=>{
+    let peer=null,conn=null,done=false,timer=null;
+    const finish=result=>{if(done)return;done=true;clearTimeout(timer);try{if(conn)conn.close()}catch(e){}try{if(peer&&!peer.destroyed)peer.destroy()}catch(e){}resolve(result)};
+    timer=setTimeout(()=>finish(null),4200);
+    try{
+      peer=new Peer();
+      peer.on('error',()=>finish(null));
+      peer.on('open',()=>{
+        try{conn=peer.connect('impostor-public-'+slot,{reliable:true})}catch(e){finish(null);return}
+        conn.on('data',m=>{if(m&&m.t==='full')finish({slot,count:12,full:true});else if(m&&m.t==='l'&&Array.isArray(m.l))finish({slot,count:Math.max(1,m.l.length-1),full:false})});
+        conn.on('error',()=>finish(null));conn.on('close',()=>finish(null));
+      });
+    }catch(e){finish(null)}
+  }))).then(found=>{
+    const rooms=found.filter(Boolean).sort((a,b)=>a.count-b.count);list.replaceChildren();
+    if(!rooms.length){msg.textContent='ما في غرف عامة مفتوحة حالياً. فيك تنشئ غرفة عامة وتنتظر انضمام اللاعبين.';return}
+    msg.textContent='الغرف المتاحة الآن: '+rooms.length;
+    rooms.forEach(r=>{
+      const row=h('div',null,'public-room-row');
+      const info=h('span','غرفة عامة '+r.slot+'  •  '+(r.full?'ممتلئة':r.count+' / 12 لاعب'),'public-room-info');
+      const join=h('button',r.full?'ممتلئة':'انضمام','menu-btn secondary');join.disabled=r.full;
+      join.onclick=()=>{setPlayerName(nameInput);enterOnline(false,'PUBLIC-'+r.slot,'impostor-public-'+r.slot,publicMsg)};
+      row.append(info,join);list.append(row);
+    });
+  });
+}
+
 function leaveRoom(){if(R&&R.close)R.close();R=null;G=null;peers=[];BOTS=[];joined=false;room='';$('st').textContent='جاهز';$('bar').querySelectorAll('button').forEach(b=>{b.hidden=true});lobby()}
 function lobby(){
   ov.className='';ov.replaceChildren();
@@ -421,13 +455,13 @@ function lobby(){
     const privateActions=h('div',null,'menu-actions');const privateMsg=h('small','تحتاجون اتصال إنترنت.','menu-message');
     privateActions.append(h('button','إنشاء غرفة','menu-btn primary',()=>{setPlayerName(nameInput);const code=String(1000+Math.floor(Math.random()*9000));enterOnline(true,code,null,privateMsg)}),h('button','انضمام بالكود','menu-btn secondary',()=>{setPlayerName(nameInput);const code=privateCode.value.trim();if(!/^\d{4}$/.test(code)){privateMsg.textContent='أدخل كوداً صحيحاً من 4 أرقام';return}enterOnline(false,code,null,privateMsg)}));privateCard.append(privateActions,privateMsg);
     const publicCard=h('section',null,'menu-card');publicCard.append(h('div','03 / مجتمع اللاعبين','menu-eyebrow'),h('h3','غرف عامة أونلاين'),h('p','ابحث عن مباراة عامة أو افتح غرفة ليتمكن لاعبون آخرون من الانضمام.'));
-    const publicActions=h('div',null,'menu-actions');const publicMsg=h('small','الغرف العامة تعتمد على وجود مضيف متصل.','menu-message');
-    publicActions.append(h('button','إنشاء غرفة عامة','menu-btn primary',()=>{setPlayerName(nameInput);createPublicRoom(publicMsg)}),h('button','بحث عن مباراة','menu-btn secondary',()=>{setPlayerName(nameInput);findPublicRoom(publicMsg)}));publicCard.append(publicActions,publicMsg);
+    const publicActions=h('div',null,'menu-actions');const publicMsg=h('small','اعرض الغرف المفتوحة وعدد اللاعبين فيها، أو ادخل مباراة عشوائية. الغرفة تبقى متاحة ما دام منشئها متصلاً.','menu-message');const publicList=h('div',null,'public-room-list');
+    publicActions.append(h('button','إنشاء غرفة عامة','menu-btn primary',()=>{setPlayerName(nameInput);createPublicRoom(publicMsg)}),h('button','تحديث قائمة الغرف','menu-btn secondary',()=>scanPublicRooms(publicList,publicMsg,nameInput)),h('button','انضمام عشوائي','menu-btn secondary',()=>{setPlayerName(nameInput);scanPublicRooms(publicList,publicMsg,nameInput);setTimeout(()=>{const choices=[...publicList.querySelectorAll('button')].filter(b=>!b.disabled);if(choices.length)choices[Math.floor(Math.random()*choices.length)].click();else findPublicRoom(publicMsg)},4600)}));publicCard.append(publicActions,publicMsg,publicList);
     cards.append(solo,privateCard,publicCard);
     shell.append(brand,intro,nameWrap,cards,h('div','IMPOSTOR  •  CREW VS IMPOSTOR','menu-foot'));ov.append(shell);return;
   }
   const l=h('div',null,'pl');named().forEach(p=>{const c=h('div',null,'chip');const d=h('span',null,'dot');d.style.background=COL[p.presence.c||0];c.append(d,h('span',p.presence.n+(p.isMe?' (أنت)':'')));l.append(c)});
-  ov.append(h('h2',room.startsWith('عامة')?'🌐 غرفة عامة':'🔒 غرفة خاصة'),h('p','كود الغرفة: '+room.replace('عامة ','').replace('PUBLIC-','')),h('small','شارك الكود مع أصدقائك'),h('p','اللاعبون: '+named().length+' / 10'),l);
+  ov.append(h('h2',room.startsWith('عامة')?'🌐 غرفة عامة':'🔒 غرفة خاصة'),h('p','كود الغرفة: '+room.replace('عامة ','').replace('PUBLIC-','')),h('small','شارك الكود مع أصدقائك'),h('p','اللاعبون: '+named().length+' / 12'),l);
   const n=named().length;
   if(R.isHost){const b=h('button','ابدأ اللعبة','',startGame);b.disabled=n<3;ov.append(b);if(n<3)ov.append(h('small','تحتاج 3 لاعبين على الأقل لبدء المباراة.'))}
   else ov.append(h('small','بانتظار منشئ الغرفة يبدأ اللعبة…'));
@@ -526,14 +560,13 @@ function wires(b,fin){
   [0,1,2,3].forEach(i=>left.append(make(i,true)));order.forEach(i=>right.append(make(i,false)));frame.append(left,right);b.append(frame);
 }
 function seq(b,fin){
-  b.append(h('small','MEMORY MODULE  •  REPEAT THE LIGHT SEQUENCE'));
-  const screen=h('div',null,'task-screen');screen.style.cssText+=';font-size:13px;margin-bottom:5px';screen.textContent='MEMORY BANK // READY';
-  const pads=h('div');pads.style.cssText='display:grid;grid-template-columns:repeat(2,1fr);gap:8px;width:min(100%,300px)';
-  const colors=['#d94b4b','#3c91d5','#e5bd36','#38a96b'];let round=0,sequence=[],input=0,locked=true;
-  const buttons=colors.map((c,i)=>{const x=h('button','');x.style.cssText='height:74px;background:'+c+';border:4px solid #637987;border-radius:7px;opacity:.65';x.onclick=()=>{if(locked)return;if(i!==sequence[input]){screen.textContent='ERROR // TRY AGAIN';round=0;setTimeout(next,650);return}input++;if(input===sequence.length){if(round===4){fin();return}round++;setTimeout(next,550)}};pads.append(x);return x});
-  function flash(i){buttons[i].style.opacity='1';buttons[i].style.filter='brightness(1.5)';setTimeout(()=>{buttons[i].style.opacity='.65';buttons[i].style.filter='none'},330)}
-  function next(){sequence=Array.from({length:round+2},()=>Math.random()*4|0);input=0;locked=true;screen.textContent='WATCH THE LIGHTS  //  LEVEL '+(round+1);sequence.forEach((v,n)=>setTimeout(()=>flash(v),650+n*650));setTimeout(()=>{locked=false;screen.textContent='YOUR TURN  //  REPEAT';},650+sequence.length*650)}
-  b.append(screen,pads);next();
+  b.append(h('small','أعد تشغيل الدارة: شاهد الومضات ثم اضغط الأزرار بالترتيب'));
+  const screen=h('div','جاهز لتشغيل الدارة','task-screen');
+  const pads=h('div');pads.style.cssText='display:grid;grid-template-columns:repeat(3,1fr);gap:10px;width:min(100%,330px)';
+  const colors=['#e65353','#398fd0','#35ad78'];let sequence=[],step=0,locked=true,timers=[];
+  const buttons=colors.map((c,i)=>{const x=h('button','');x.style.cssText='height:82px;min-height:64px;background:'+c+';border:4px solid #637987;border-radius:10px;opacity:.72;touch-action:manipulation';x.onclick=()=>{if(locked)return;if(i!==sequence[step]){screen.textContent='خطأ بسيط — حاول مرة ثانية';step=0;return}step++;screen.textContent='تم توصيل '+step+' / 3';if(step===3){locked=true;fin()}};pads.append(x);return x});
+  function play(){sequence=Array.from({length:3},()=>Math.random()*3|0);step=0;locked=true;screen.textContent='راقب ترتيب الإشارات';sequence.forEach((v,n)=>{const t=setTimeout(()=>{buttons[v].style.opacity='1';buttons[v].style.filter='brightness(1.6)';setTimeout(()=>{buttons[v].style.opacity='.72';buttons[v].style.filter='none'},300)},450+n*550);timers.push(t)});const t=setTimeout(()=>{locked=false;screen.textContent='دورك — اضغط نفس الترتيب'},450+sequence.length*550);timers.push(t)}
+  const replay=h('button','إعادة عرض الإشارات','task-action',()=>play());b.append(screen,pads,replay);play();
 }
 function fuel(b,fin){
   b.append(h('small','FUEL STATION  •  HOLD TO TRANSFER FUEL INTO THE ENGINE'));
@@ -581,9 +614,11 @@ function code(b,fin){
   const update=()=>display.textContent=v.padEnd(4,'_').split('').join(' ');[1,2,3,4,5,6,7,8,9,'CLR',0,'ENT'].forEach(k=>{const x=h('button',String(k));x.style.cssText='height:43px;padding:4px';x.onclick=()=>{if(k==='CLR')v='';else if(k==='ENT'){if(v===c)fin();else{v='';display.textContent='INVALID CODE'}}else if(v.length<4)v+=k;update()};keys.append(x)});b.append(h('small','ENTER THE SECURITY CODE DISPLAYED ON THE DATA SLATE'),h('div','CODE: '+c,'task-screen'),display,keys);
 }
 function gen(b,fin){
-  b.append(h('small','POWER DISTRIBUTION  •  ROUTE POWER TO THE SELECTED SYSTEM'));
-  const d=h('div');d.style.cssText='width:100%;max-width:420px;display:grid;grid-template-columns:1fr 1fr;gap:12px';const labels=['ENGINE','SECURITY','O2','NAVIGATION'];let selected=-1;
-  labels.forEach((name,i)=>{const tile=h('button',name);tile.style.cssText='height:75px;background:linear-gradient(#d9e3e9,#91a5b1);color:#213847;border:4px solid #657d8a';tile.onclick=()=>{selected=i;[...d.children].forEach((x,j)=>x.style.outline=j===i?'4px solid #38bd79':'none')}});const lever=h('button','PULL POWER SWITCH  ↘','task-action');lever.style.gridColumn='1/-1';lever.disabled=true;lever.onclick=()=>{if(selected<0)return;lever.textContent='POWER ROUTED ✓';fin()};d.append(lever);d.querySelectorAll('button').forEach((tile,i)=>{if(i<4){const old=tile.onclick;tile.onclick=()=>{old();lever.disabled=false}}});device(b,'ELECTRICAL // POWER DIVERSION',d);
+  b.append(h('small','اختر النظام المطلوب ثم شغّل المولّد'));
+  const d=h('div');d.style.cssText='width:100%;max-width:420px;display:grid;grid-template-columns:1fr 1fr;gap:12px';
+  const labels=['المحرّك','الأمان','الأكسجين','الملاحة'];let selected=-1;
+  labels.forEach((name,i)=>{const tile=h('button',name);tile.style.cssText='height:72px;background:linear-gradient(#d9e3e9,#91a5b1);color:#213847;border:4px solid #657d8a;border-radius:9px;font-weight:800';tile.onclick=()=>{selected=i;[...d.querySelectorAll('.generator-tile')].forEach((x,j)=>x.style.outline=j===i?'4px solid #38bd79':'none');lever.disabled=false};tile.className='generator-tile';d.append(tile)});
+  const lever=h('button','تشغيل المولّد ⚡','task-action');lever.style.gridColumn='1/-1';lever.disabled=true;lever.onclick=()=>{if(selected<0)return;lever.textContent='تم تشغيل المولّد ✓';fin()};d.append(lever);device(b,'POWER GENERATOR // STARTUP',d);
 }
 function odd(b,fin){
   b.append(h('small','SHIELDS  •  ACTIVATE THE PANELS THAT ARE NOT LIT'));
@@ -805,7 +840,7 @@ function draw(){
   if(G){ST.forEach((s,i)=>icon(TY[i],s[0],s[1],G.done.has(i)));FX.forEach(f=>{const a=(Date.now()-f.t)/900;if(a<1){cx.strokeStyle='rgba(255,70,95,'+(1-a)+')';cx.lineWidth=4;cx.beginPath();cx.arc(f.x,f.y,20+a*60,0,6.283);cx.stroke()}});
     G.bodies.forEach(b=>{cx.fillStyle='rgba(0,0,0,.35)';cx.beginPath();cx.ellipse(b.x,b.y+12,24,8,0,0,6.28);cx.fill();cx.fillStyle=colr(b.p);cx.beginPath();cx.ellipse(b.x,b.y+3,19,10,0,0,6.28);cx.fill();cx.fillStyle='#fff';cx.font='bold 15px system-ui';cx.fillText('✕',b.x,b.y+8)});
     const id=myId(),mr=G.roles[id];Object.keys(G.roles).forEach(p=>{const q=pos(p);if(!q)return;const gh=G.dead.has(p);if(gh&&!(p===id||dead))return;const isMe=p===id;if(isMe){q.x=my.x;q.y=my.y}
-      cx.globalAlpha=gh?.38:1;const l=LP[p]||(LP[p]={x:q.x,y:q.y,f:1,w:0}),mv=Math.hypot(q.x-l.x,q.y-l.y);if(mv>.3){l.w+=mv*.28;if(Math.abs(q.x-l.x)>.2)l.f=q.x>l.x?1:-1}l.x=q.x;l.y=q.y;
+      cx.globalAlpha=gh?.38:1;const l=LP[p]||(LP[p]={x:q.x,y:q.y,f:1,w:0}),mv=Math.hypot(q.x-l.x,q.y-l.y);if(mv>.3){l.w+=mv*.28;if(Math.abs(q.x-l.x)>.2)l.f=q.x>l.x?1:-1}if(isMe){l.x=q.x;l.y=q.y}else{l.x+=(q.x-l.x)*.32;l.y+=(q.y-l.y)*.32}q.x=l.x;q.y=l.y;
       cx.fillStyle='rgba(0,0,0,.36)';cx.beginPath();cx.ellipse(q.x,q.y+19,18,6,0,0,6.28);cx.fill();sprite(q.x,q.y,colr(p),l.f,mv>.3?l.w:0);
       cx.font='bold 12px system-ui';cx.textAlign='center';const label=nm(p)+(isMe?' ★':'');const ww=cx.measureText(label).width+16;cx.fillStyle='rgba(4,13,23,.82)';cx.beginPath();cx.roundRect(q.x-ww/2,q.y-43,ww,19,7);cx.fill();cx.strokeStyle='rgba(166,220,245,.4)';cx.lineWidth=1;cx.stroke();cx.fillStyle=(mr==='i'&&G.roles[p]==='i')?'#ff8998':'#f1f8ff';cx.fillText(label,q.x,q.y-29);cx.globalAlpha=1;
     });
@@ -842,7 +877,7 @@ function tick(){
     if(K.ArrowLeft||K.a)dx--;if(K.ArrowRight||K.d)dx++;if(K.ArrowUp||K.w)dy--;if(K.ArrowDown||K.s)dy++;
     if(!dx&&!dy&&ptr){const ex=ptr.x-VW/2,ey=ptr.y-VH/2;if(Math.hypot(ex,ey)>18){dx=ex;dy=ey}}
     if(!dx&&!dy&&(joy.x||joy.y)){dx=joy.x;dy=joy.y}
-    if(dx||dy){const d=Math.hypot(dx,dy);my.x+=dx/d*3.2;my.y+=dy/d*3.2;col(my,14);R.presence({x:Math.round(my.x),y:Math.round(my.y)})}
+    if(dx||dy){const d=Math.hypot(dx,dy);my.x+=dx/d*3.2;my.y+=dy/d*3.2;col(my,14);if(Date.now()-lastPresenceAt>=70){lastPresenceAt=Date.now();R.presence({x:Math.round(my.x),y:Math.round(my.y)})}}
   }
   ui();draw();requestAnimationFrame(tick);
 }
