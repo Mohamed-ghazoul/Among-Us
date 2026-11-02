@@ -7,6 +7,7 @@
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="mobile-web-app-capable" content="yes">
 <script src="https://cdn.jsdelivr.net/npm/peerjs@1.5.4/dist/peerjs.min.js"></script>
+<script>(function(){if(typeof Peer!=='undefined')return;var u=['https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js','https://cdnjs.cloudflare.com/ajax/libs/peerjs/1.5.4/peerjs.min.js','https://fastly.jsdelivr.net/npm/peerjs@1.5.4/dist/peerjs.min.js'],i=0;function n(){if(typeof Peer!=='undefined'||i>=u.length)return;var s=document.createElement('script');s.src=u[i++];s.onload=function(){if(typeof Peer==='undefined')n()};s.onerror=n;document.head.appendChild(s)}n()})();</script>
 <title>المحتال - Impostor</title>
 <style>
 :root{box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px);--bg:#0b1020;--panel:#161d36;--ink:#eef1ff;--mut:#8f9bc7;--acc:#7c5cff;--bad:#ff4d5e;--ok:#3ddc97}
@@ -502,39 +503,145 @@ function localNet(n){
   return{n,isHost:true,local:true,ps,fire,on:(t,f)=>{(H.ev[t]=H.ev[t]||[]).push(f)},onPeers:f=>f({peers:ps,joined:[],left:[],updated:[]}),emit:(t,d)=>fire(t,d,'me'),presence:p=>Object.assign(ps[0].presence,p)};
 }
 let room='';
+/* ===== إعدادات الاتصال (STUN/TURN) =====
+   ضع هنا خوادم TURN الخاصة فيك (Metered / Cloudflare / Twilio ...) مثال:
+   const CUSTOM_ICE_SERVERS=[{urls:['turn:YOUR_HOST:443?transport=tcp','turns:YOUR_HOST:443?transport=tcp'],username:'USER',credential:'PASS'}];
+   الخوادم المجانية العامة بالأسفل بتشتغل كحل مؤقت وممكن تكون بطيئة أو مزدحمة. */
+const CUSTOM_ICE_SERVERS=[];
+const ICE_SERVERS=[
+  ...CUSTOM_ICE_SERVERS,
+  {urls:['stun:stun.l.google.com:19302','stun:stun1.l.google.com:19302','stun:global.stun.twilio.com:3478']},
+  {urls:['turn:eu-0.turn.peerjs.com:3478','turn:us-0.turn.peerjs.com:3478'],username:'peerjs',credential:'peerjsp'},
+  {urls:['turn:openrelay.metered.ca:80','turn:openrelay.metered.ca:443','turn:openrelay.metered.ca:443?transport=tcp','turns:openrelay.metered.ca:443?transport=tcp'],username:'openrelayproject',credential:'openrelayproject'}
+];
+const PEER_OPTS={debug:0,config:{iceServers:ICE_SERVERS,iceCandidatePoolSize:4,sdpSemantics:'unified-plan'}};
 function startNet(host,code,ok,fail,peerId){
-  const H={ev:{},pc:[]},conns={},pres={};let myid=null,last=[],dirty=false,hc=null,pr=null,finished=false,timeout=null;
-  const target=peerId||('amg-'+code);
-  const cleanup=()=>{clearTimeout(timeout);try{if(hc&&hc.open)hc.close()}catch(e){}try{if(pr&&!pr.destroyed)pr.destroy()}catch(e){}};
+  const H={ev:{},pc:[]},conns={},pres={};
+  let myid=null,last=[],dirty=false,hc=null,pr=null,finished=false,timeout=null;
+  let attempts=0,welcome=false,retryTimer=null,connectedAt=0,wd=null,connTimer=null,lastErr='';
+  const maxAttempts=String(peerId||'').startsWith('impostor-public-')?3:6;
+  const target=peerId||('impostor-r-'+code);
+  const roster=()=>Object.keys(pres).map(id=>({peer:id,presence:{...pres[id]}}));
+  const cleanup=()=>{
+    clearTimeout(timeout);clearTimeout(retryTimer);clearTimeout(connTimer);clearInterval(wd);
+    try{if(hc&&hc.open)hc.close()}catch(e){}
+    try{if(pr&&!pr.destroyed)pr.destroy()}catch(e){}
+  };
   const failOnce=e=>{if(finished)return;finished=true;cleanup();fail(e)};
-  const okOnce=()=>{if(finished)return;finished=true;clearTimeout(timeout);ok()};
-  timeout=setTimeout(()=>failOnce('تعذر الاتصال بالغرفة. تحقق من الإنترنت وحاول مجدداً.'),(!host&&peerId?3500:8500));
+  const okOnce=()=>{if(finished||welcome)return;welcome=true;connectedAt=Date.now();clearTimeout(timeout);clearTimeout(connTimer);ok()};
   const fire=(t,d,from)=>(H.ev[t]||[]).forEach(f=>f({topic:t,data:d,peer:from,isMe:from===myid,sameTab:from===myid}));
-  const setPeers=l=>{const ps=l.map(o=>({peer:o.peer,presence:o.presence||{},isMe:o.peer===myid,sameTab:o.peer===myid}));
-    const left=last.filter(a=>!ps.find(b=>b.peer===a.peer)),jn=ps.filter(b=>!last.find(a=>a.peer===b.peer));
-    last=ps;H.pc.forEach(f=>f({peers:ps,joined:jn,left,updated:[]}))};
-  const pub=()=>{if(dirty)return;dirty=true;setTimeout(()=>{dirty=false;const l=Object.keys(pres).map(id=>({peer:id,presence:pres[id]}));
-    Object.values(conns).forEach(c=>c.open&&c.send({t:'l',l}));setPeers(l)},50)};
-  const bc=(t,d,from)=>{fire(t,d,from);Object.values(conns).forEach(c=>c.open&&c.send({t:'e',k:t,d,from}))};
-  const setP=(id,p)=>{pres[id]=Object.assign(pres[id]||{},p);pub()};
-  const net={isHost:host,on:(t,f)=>{(H.ev[t]=H.ev[t]||[]).push(f)},onPeers:f=>H.pc.push(f),
-    emit:(t,d)=>{if(host)bc(t,d,myid);else if(hc&&hc.open)hc.send({t:'e',k:t,d})},
-    presence:p=>{if(host)setP(myid,p);else if(hc&&hc.open)hc.send({t:'p',p})},
+  const setPeers=l=>{
+    if(!Array.isArray(l))return;
+    const ps=l.filter(o=>o&&o.peer).map(o=>({peer:o.peer,presence:o.presence||{},isMe:o.peer===myid,sameTab:o.peer===myid}));
+    const left=last.filter(a=>!ps.some(b=>b.peer===a.peer));
+    const jn=ps.filter(b=>!last.some(a=>a.peer===b.peer));
+    last=ps;H.pc.forEach(f=>f({peers:ps,joined:jn,left,updated:[]}));
+  };
+  const pub=()=>{
+    if(dirty)return;dirty=true;
+    setTimeout(()=>{
+      dirty=false;const l=roster();
+      Object.values(conns).forEach(c=>{if(c&&c.open)try{c.send({t:'l',l})}catch(e){}});
+      setPeers(l);
+    },60);
+  };
+  const bc=(t,d,from)=>{
+    fire(t,d,from);
+    Object.values(conns).forEach(c=>{if(c&&c.open)try{c.send({t:'e',k:t,d,from})}catch(e){}});
+  };
+  const setP=(id,p)=>{pres[id]=Object.assign(pres[id]||{},p||{});pub()};
+  const retryConnect=()=>{
+    if(host||finished||welcome||!pr||pr.destroyed)return;
+    if(attempts>=maxAttempts){failOnce(lastErr==='peer-unavailable'?'الغرفة غير موجودة. تأكد من الكود وأن المضيف ما زال فاتحها.':'تعذّر الاتصال المباشر بالمضيف، غالباً بسبب نوع الشبكة. جرّب شبكة أخرى (واي فاي/بيانات) أو أطفئ VPN. ['+(lastErr||'timeout')+']');return}
+    clearTimeout(retryTimer);
+    retryTimer=setTimeout(()=>{
+      if(finished||welcome)return;
+      try{if(hc&&!hc.open)hc.close()}catch(e){}
+      connectToHost();
+    },Math.min(2200,450+attempts*350));
+  };
+  const connectToHost=()=>{
+    if(finished||welcome||!pr||pr.destroyed)return;
+    attempts++;
+    try{
+      const mine=hc=pr.connect(target,{reliable:true,serialization:'json'});
+      clearTimeout(connTimer);
+      connTimer=setTimeout(()=>{if(finished||welcome||hc!==mine)return;lastErr='ice-timeout';try{mine.close()}catch(e){}retryConnect()},9000);
+      hc.on('open',()=>{try{hc.send({t:'hi'})}catch(e){}});
+      hc.on('data',m=>{
+        if(!m||typeof m!=='object')return;
+        if(m.t==='full'){failOnce('الغرفة ممتلئة أو بدأت المباراة بالفعل');return}
+        if(m.t==='w'){setPeers(m.l||[]);okOnce();return}
+        if(m.t==='l'){setPeers(m.l||[]);return}
+        if(m.t==='e')fire(m.k,m.d,m.from);
+      });
+      hc.on('error',e=>{if(!welcome){lastErr=(e&&e.type)||'dc-error';retryConnect()}else $('st').textContent='جاري استعادة الاتصال…'});
+      hc.on('close',()=>{
+        if(!welcome){if(!lastErr)lastErr='closed';retryConnect()}
+        else if(!finished){$('st').textContent='انقطع الاتصال بالمضيف';if(net.lost)net.lost()}
+      });
+    }catch(e){retryConnect()}
+  };
+  const net={
+    isHost:host,
+    on:(t,f)=>{(H.ev[t]=H.ev[t]||[]).push(f)},
+    onPeers:f=>{H.pc.push(f);if(last.length)f({peers:last,joined:last,left:[],updated:[]})},
+    emit:(t,d)=>{if(host)bc(t,d,myid);else if(hc&&hc.open)try{hc.send({t:'e',k:t,d})}catch(e){}},
+    presence:p=>{if(host)setP(myid,p);else if(hc&&hc.open)try{hc.send({t:'p',p})}catch(e){}},
     close:()=>{finished=true;cleanup();Object.values(conns).forEach(c=>{try{c.close()}catch(e){}})},
-    pub:host?pub:null,fire:host?bc:null,pres:host?pres:null,addBot:(id,p)=>{if(host){pres[id]=p;pub()}},removeBot:id=>{if(host){delete pres[id];pub()}}};
-  pr=new Peer(host?target:undefined);
-  pr.on('error',e=>failOnce(e.type==='unavailable-id'?'هذه الغرفة مستخدمة بالفعل':e.type==='peer-unavailable'?'الغرفة غير موجودة حالياً':'مشكلة بالاتصال، حاول مرة ثانية'));
-  pr.on('open',id=>{myid=id;
-    if(host){pres[id]={};okOnce()}
-    else{hc=pr.connect(target,{reliable:true});
-      hc.on('open',okOnce);
-      hc.on('data',m=>{if(m.t==='full'){failOnce('الغرفة ممتلئة أو بدأت المباراة بالفعل');return}if(m.t==='e')fire(m.k,m.d,m.from);else if(m.t==='l')setPeers(m.l)});
-      hc.on('error',()=>failOnce('تعذر الانضمام إلى الغرفة'));
-      hc.on('close',()=>{$('st').textContent='انقطع الاتصال بالمضيف';if(net.lost)net.lost()})}});
-  if(host)pr.on('connection',c=>{
-    c.on('open',()=>{const full=()=>{try{c.send({t:'full'});setTimeout(()=>c.close(),120)}catch(e){c.close()}};if(G&&G.phase!=='end'){full();return}if(Object.keys(pres).length>=12){const bid=Object.keys(pres).find(k=>pres[k]&&pres[k].bot);if(bid)delete pres[bid];else{full();return}}conns[c.peer]=c;pres[c.peer]={};pub()});
-    c.on('data',m=>{if(m.t==='e')bc(m.k,m.d,c.peer);else if(m.t==='p')setP(c.peer,m.p)});
-    c.on('close',()=>{delete conns[c.peer];delete pres[c.peer];pub()})});
+    pub:host?pub:null,fire:host?bc:null,pres:host?pres:null,
+    addBot:(id,p)=>{if(host){pres[id]=p;pub()}},
+    removeBot:id=>{if(host){delete pres[id];pub()}}
+  };
+  timeout=setTimeout(()=>failOnce('تعذّر الاتصال بعد عدة محاولات. تحقق من الإنترنت أو جرّب غرفة أخرى. ['+(lastErr||'timeout')+']'),host?20000:(peerId?32000:34000));
+  try{
+    if(typeof Peer==='undefined'){failOnce('خدمة الاتصال غير متاحة. حدّث الصفحة وحاول مجدداً.');return net}
+    pr=new Peer(host?target:undefined,PEER_OPTS);
+    pr.on('error',e=>{
+      lastErr=(e&&e.type)||lastErr;try{console.warn('[net]',e&&e.type,e&&e.message)}catch(_){}
+      if(finished||(!host&&welcome))return;
+      if(host&&e.type==='unavailable-id'){failOnce('هذه الغرفة مستخدمة بالفعل');return}
+      if(!host&&e.type==='peer-unavailable'){retryConnect();return}
+      if(!host&&welcome){$('st').textContent='جاري استعادة الاتصال…';return}
+      if(host){failOnce(e.type==='network'?'تعذّر الوصول إلى خدمة الاتصال. تحقق من الشبكة.':'مشكلة في إنشاء الغرفة، حاول مرة ثانية ['+e.type+']')}
+      else if(e.type==='network'||e.type==='socket-error')retryConnect();
+      else if(attempts>=maxAttempts||e.type==='browser-incompatible'||e.type==='ssl-unavailable'||e.type==='invalid-id'||e.type==='invalid-key')failOnce('مشكلة بالاتصال، حاول مرة ثانية. ['+e.type+']');
+    });
+    pr.on('disconnected',()=>{if(finished||!pr||pr.destroyed)return;try{pr.reconnect()}catch(e){}});
+    wd=setInterval(()=>{if(finished||!pr||pr.destroyed)return;if(pr.disconnected){try{pr.reconnect()}catch(e){}}},5000);
+    pr.on('open',id=>{
+      if(myid&&myid===id)return; /* إعادة اتصال بسيرفر الإشارة: لا تعيد تهيئة الغرفة */
+      myid=id;
+      if(host){pres[id]={};okOnce();pub()}
+      else connectToHost();
+    });
+    if(host)pr.on('connection',c=>{
+      let admitted=false,probe=false,rejected=false;
+      const admit=()=>{
+        if(admitted||probe||rejected||!c.open)return;
+        const full=()=>{rejected=true;try{c.send({t:'full'});setTimeout(()=>c.close(),250)}catch(e){try{c.close()}catch(_){}}};
+        if(G&&G.phase!=='end'){full();return}
+        if(Object.keys(pres).length>=12){
+          const bid=Object.keys(pres).find(k=>pres[k]&&pres[k].bot);
+          if(bid)delete pres[bid];else{full();return}
+        }
+        admitted=true;conns[c.peer]=c;pres[c.peer]={};
+        try{c.send({t:'w',l:roster()})}catch(e){}
+        pub();
+      };
+      c.on('open',()=>{setTimeout(admit,1500)}); /* للنسخ القديمة اللي ما بتبعت 'hi' */
+      c.on('data',m=>{
+        if(!m||typeof m!=='object')return;
+        if(m.t==='probe'){probe=true;const n=Object.keys(pres).length,started=!!(G&&G.phase!=='end');try{c.send({t:'info',n,full:started||n>=12})}catch(e){}setTimeout(()=>{try{c.close()}catch(_){}},300);return}
+        if(m.t==='hi'){admit();return}
+        if(!admitted)return;
+        if(m.t==='e')bc(m.k,m.d,c.peer);
+        else if(m.t==='p')setP(c.peer,m.p);
+      });
+      const gone=()=>{if(admitted&&conns[c.peer]===c){delete conns[c.peer];delete pres[c.peer];pub()}};
+      c.on('close',gone);c.on('error',gone);
+    });
+  }catch(e){failOnce('تعذّر تشغيل خدمة اللعب عبر الإنترنت')}
   return net;
 }
 
@@ -553,9 +660,9 @@ function setLobbyBots(n){
 }
 function lostHost(){toast('⚠ انقطع الاتصال بالمضيف');setTimeout(()=>{if(R&&!R.isHost&&!R.local)leaveRoom()},2500)}
 function setPlayerName(input){const v=input.value.trim().slice(0,12);nick=v||nick||'لاعب';if(v)store.set('nick',v)}
-function enterOnline(host,code,peerId,msg){
+function enterOnline(host,code,peerId,msg,tries){
   msg.textContent='جاري الاتصال…';$('st').textContent='يتصل…';
-  R=startNet(host,code,()=>{room=code;joined=true;R.presence({n:nick,c:Math.floor(Math.random()*COL.length),x:865*SCALE,y:710*SCALE});$('st').textContent='متصل ✓';wire();lobby()},e=>{R=null;$('st').textContent='غير متصل';msg.textContent=e},peerId);if(R)R.lost=lostHost;
+  R=startNet(host,code,()=>{room=code;joined=true;R.presence({n:nick,c:Math.floor(Math.random()*COL.length),x:865*SCALE,y:710*SCALE});$('st').textContent='متصل ✓';wire();lobby()},e=>{R=null;$('st').textContent='غير متصل';if(host&&!peerId&&String(e).includes('مستخدمة')&&(tries||0)<5){enterOnline(true,String(1000+Math.floor(Math.random()*9000)),null,msg,(tries||0)+1);return}msg.textContent=e},peerId);if(R)R.lost=lostHost;
 }
 function createPublicRoom(msg,slot=1){
   if(slot>PUBLIC_SLOTS){msg.textContent='كل الغرف العامة ممتلئة حالياً. جرّب بعد قليل أو أنشئ غرفة خاصة.';R=null;return}
@@ -572,22 +679,28 @@ function findPublicRoom(msg,slot=1){
 
 function scanPublicRooms(list,msg,nameInput){
   list.replaceChildren();msg.textContent='نفحص الغرف العامة المتاحة…';
-  if(typeof Peer==='undefined'){msg.textContent='خدمة الاتصال غير محمّلة. حدّث الصفحة وحاول مجدداً.';return}
-  const probes=Array.from({length:PUBLIC_SLOTS},(_,i)=>i+1);
-  Promise.all(probes.map(slot=>new Promise(resolve=>{
-    let peer=null,conn=null,done=false,timer=null;
-    const finish=result=>{if(done)return;done=true;clearTimeout(timer);try{if(conn)conn.close()}catch(e){}try{if(peer&&!peer.destroyed)peer.destroy()}catch(e){}resolve(result)};
-    timer=setTimeout(()=>finish(null),4200);
-    try{
-      peer=new Peer();
-      peer.on('error',()=>finish(null));
-      peer.on('open',()=>{
-        try{conn=peer.connect('impostor-public-'+slot,{reliable:true})}catch(e){finish(null);return}
-        conn.on('data',m=>{if(m&&m.t==='full')finish({slot,count:12,full:true});else if(m&&m.t==='l'&&Array.isArray(m.l))finish({slot,count:Math.max(1,m.l.length-1),full:false})});
-        conn.on('error',()=>finish(null));conn.on('close',()=>finish(null));
-      });
-    }catch(e){finish(null)}
-  }))).then(found=>{
+  if(typeof Peer==='undefined'){msg.textContent='خدمة الاتصال غير محمّلة. حدّث الصفحة وحاول مجدداً.';return Promise.resolve()}
+  return new Promise(resolveAll=>{
+    let peer=null,fin=false;const results=[],conns=[],seen=new Set();
+    const finish=()=>{if(fin)return;fin=true;clearTimeout(gt);conns.forEach(c=>{try{c.close()}catch(e){}});try{if(peer&&!peer.destroyed)peer.destroy()}catch(e){}resolveAll(results)};
+    const gt=setTimeout(finish,9000);
+    const mark=(slot,res)=>{if(seen.has(slot))return;seen.add(slot);if(res)results.push(res);if(seen.size>=PUBLIC_SLOTS)finish()};
+    try{peer=new Peer(undefined,PEER_OPTS)}catch(e){finish();return}
+    peer.on('error',e=>{
+      const m=/impostor-public-(\d+)/.exec((e&&e.message)||'');
+      if(e&&e.type==='peer-unavailable'&&m){mark(+m[1],null);return}
+      finish();
+    });
+    peer.on('open',()=>{
+      for(let slot=1;slot<=PUBLIC_SLOTS;slot++){
+        let c;try{c=peer.connect('impostor-public-'+slot,{reliable:true,serialization:'json'})}catch(e){mark(slot,null);continue}
+        conns.push(c);
+        c.on('open',()=>{try{c.send({t:'probe'})}catch(e){}});
+        c.on('data',m=>{if(!m||typeof m!=='object')return;if(m.t==='info')mark(slot,{slot,count:Math.max(1,m.n||1),full:!!m.full});else if(m.t==='full')mark(slot,{slot,count:12,full:true})});
+        c.on('error',()=>mark(slot,null));c.on('close',()=>mark(slot,null));
+      }
+    });
+  }).then(found=>{
     const rooms=found.filter(Boolean).sort((a,b)=>a.count-b.count);list.replaceChildren();
     if(!rooms.length){msg.textContent='ما في غرف عامة مفتوحة حالياً. فيك تنشئ غرفة عامة وتنتظر انضمام اللاعبين.';return}
     msg.textContent='الغرف المتاحة الآن: '+rooms.length;
@@ -632,7 +745,7 @@ function lobby(){
     privateActions.append(h('button','إنشاء غرفة','menu-btn primary',()=>{setPlayerName(nameInput);const code=String(1000+Math.floor(Math.random()*9000));enterOnline(true,code,null,privateMsg)}),h('button','انضمام بالكود','menu-btn secondary',()=>{setPlayerName(nameInput);const code=privateCode.value.trim();if(!/^\d{4}$/.test(code)){privateMsg.textContent='أدخل كوداً صحيحاً من 4 أرقام';return}enterOnline(false,code,null,privateMsg)}));privateCard.append(privateActions,privateMsg);
     const publicCard=h('section',null,'menu-card');publicCard.append(h('div','03 / مجتمع اللاعبين','menu-eyebrow'),h('h3','غرف عامة أونلاين'),h('p','ابحث عن مباراة عامة أو افتح غرفة ليتمكن لاعبون آخرون من الانضمام.'));
     const publicActions=h('div',null,'menu-actions');const publicMsg=h('small','اعرض الغرف المفتوحة وعدد اللاعبين فيها، أو ادخل مباراة عشوائية. الغرفة تبقى متاحة ما دام منشئها متصلاً.','menu-message');const publicList=h('div',null,'public-room-list');
-    publicActions.append(h('button','إنشاء غرفة عامة','menu-btn primary',()=>{setPlayerName(nameInput);createPublicRoom(publicMsg)}),h('button','تحديث قائمة الغرف','menu-btn secondary',()=>scanPublicRooms(publicList,publicMsg,nameInput)),h('button','انضمام عشوائي','menu-btn secondary',()=>{setPlayerName(nameInput);scanPublicRooms(publicList,publicMsg,nameInput);setTimeout(()=>{const choices=[...publicList.querySelectorAll('button')].filter(b=>!b.disabled);if(choices.length)choices[Math.floor(Math.random()*choices.length)].click();else findPublicRoom(publicMsg)},4600)}));publicCard.append(publicActions,publicMsg,publicList);
+    publicActions.append(h('button','إنشاء غرفة عامة','menu-btn primary',()=>{setPlayerName(nameInput);createPublicRoom(publicMsg)}),h('button','تحديث قائمة الغرف','menu-btn secondary',()=>scanPublicRooms(publicList,publicMsg,nameInput)),h('button','انضمام عشوائي','menu-btn secondary',()=>{setPlayerName(nameInput);scanPublicRooms(publicList,publicMsg,nameInput).then(()=>{const choices=[...publicList.querySelectorAll('button')].filter(b=>!b.disabled);if(choices.length)choices[Math.floor(Math.random()*choices.length)].click();else findPublicRoom(publicMsg)})}));publicCard.append(publicActions,publicMsg,publicList);
     const panels=[solo,privateCard,publicCard];let tab=+store.get('tab',0);if(!(tab>=0&&tab<3))tab=0;
     const tabs=h('div',null,'menu-tabs'),TB=[['العب ضد البوتات','تدريب','#43a047'],['غرفة خاصة','مع الأصدقاء','#1e88e5'],['غرف عامة','أونلاين','#fb8c00']];
     const show=k=>{tab=k;store.set('tab',k);panels.forEach((p,j)=>{p.hidden=j!==k});[...tabs.children].forEach((b,j)=>b.classList.toggle('on',j===k))};
@@ -1036,7 +1149,13 @@ function drawBackdrop(){
     const ring=(front)=>{cx.save();cx.translate(px,py);cx.rotate(-.35);cx.lineWidth=R0*.14;cx.strokeStyle='rgba(255,210,150,.5)';cx.beginPath();cx.ellipse(0,0,R0*1.9,R0*.45,0,front?0:Math.PI,front?Math.PI:Math.PI*2);cx.stroke();cx.lineWidth=R0*.06;cx.strokeStyle='rgba(200,150,255,.45)';cx.beginPath();cx.ellipse(0,0,R0*2.2,R0*.53,0,front?0:Math.PI,front?Math.PI:Math.PI*2);cx.stroke();cx.restore()};
     ring(false);const pg=cx.createRadialGradient(px-R0*.4,py-R0*.4,R0*.1,px,py,R0);pg.addColorStop(0,'#ffc98a');pg.addColorStop(.6,'#c5663f');pg.addColorStop(1,'#4a1f5c');cx.fillStyle=pg;cx.beginPath();cx.arc(px,py,R0,0,6.283);cx.fill();ring(true);
   }else{
-    const bg=cx.createLinearGradient(0,0,0,VH);bg.addColorStop(0,'#05060b');bg.addColorStop(.55,'#020308');bg.addColorStop(1,'#000');cx.fillStyle=bg;cx.fillRect(0,0,VW,VH);
+    const bg=cx.createLinearGradient(0,0,0,VH);bg.addColorStop(0,'#071321');bg.addColorStop(.55,'#030914');bg.addColorStop(1,'#01040a');cx.fillStyle=bg;cx.fillRect(0,0,VW,VH);
+    const haze=cx.createRadialGradient(VW*.52,VH*.42,8,VW*.52,VH*.42,Math.max(VW,VH)*.72);
+    haze.addColorStop(0,'rgba(32,104,145,.16)');haze.addColorStop(.55,'rgba(16,48,82,.07)');haze.addColorStop(1,'rgba(0,0,0,0)');
+    cx.fillStyle=haze;cx.fillRect(0,0,VW,VH);
+    cx.save();cx.fillStyle='rgba(185,225,255,.72)';
+    for(let i=0;i<STARS.length;i++){const q=STARS[i],sx=((q[0]*1.7+VW*3)%VW),sy=((q[1]*1.3+VH*3)%VH);cx.globalAlpha=.12+q[2]*.12;cx.fillRect(sx,sy,q[2],q[2])}
+    cx.globalAlpha=1;cx.restore();
   }
 }
 function drawStatic(){
@@ -1090,6 +1209,19 @@ function drawStatic(){
       cx.strokeStyle=T.wall[3];cx.lineWidth=2;cx.strokeRect(x+1,y+1,w-2,h-2)}
   });
   COR.forEach(([x,y,w,h])=>{cx.fillStyle=T.thr;cx.globalAlpha=.55;if(w>h)cx.fillRect(x+w*.42,y+3,Math.min(42,w*.16),4);else cx.fillRect(x+3,y+h*.42,4,Math.min(42,h*.16));cx.globalAlpha=1});
+  /* Subtle architectural trim: illuminated room edges, access panels and floor guides. */
+  ROOM.forEach((r,i)=>{
+    const x=r.x,y=r.y,w=r.w,h=r.h;
+    cx.save();cx.globalAlpha=.72;
+    cx.strokeStyle=k==='polar'?'rgba(160,220,255,.34)':k==='ring'?'rgba(255,205,130,.25)':'rgba(150,220,245,.22)';
+    cx.lineWidth=2;cx.beginPath();cx.moveTo(x+22,y+52);cx.lineTo(x+22,y+25);cx.lineTo(x+74,y+25);
+    cx.moveTo(x+w-22,y+h-52);cx.lineTo(x+w-22,y+h-25);cx.lineTo(x+w-74,y+h-25);cx.stroke();
+    cx.fillStyle=k==='polar'?'rgba(110,205,255,.18)':'rgba(130,210,245,.13)';
+    cx.beginPath();cx.roundRect(x+w-82,y+16,58,9,4);cx.fill();
+    cx.fillStyle='rgba(225,245,255,.55)';
+    for(let q=0;q<3;q++){cx.beginPath();cx.arc(x+w-73+q*15,y+20.5,2,0,6.283);cx.fill()}
+    cx.restore();
+  });
 }
 function draw(){
   drawBackdrop();
@@ -1149,7 +1281,7 @@ function tick(){
     if(K.ArrowLeft||K.KeyA)dx--;if(K.ArrowRight||K.KeyD)dx++;if(K.ArrowUp||K.KeyW)dy--;if(K.ArrowDown||K.KeyS)dy++;
     if(!dx&&!dy&&ptr){const ex=ptr.x-VW/2,ey=ptr.y-VH/2;if(Math.hypot(ex,ey)>18){dx=ex;dy=ey}}
     if(!dx&&!dy&&(joy.x||joy.y)){dx=joy.x;dy=joy.y}
-    if(dx||dy){const d=Math.hypot(dx,dy);const speed=G.roles[myId()]==='engineer'?4.25:3.2;my.x+=dx/d*speed*DT;my.y+=dy/d*speed*DT;col(my,14);if(Date.now()-lastPresenceAt>=70){lastPresenceAt=Date.now();R.presence({x:Math.round(my.x),y:Math.round(my.y)})}}
+    if(dx||dy){const d=Math.hypot(dx,dy);const speed=G.roles[myId()]==='engineer'?4.25:3.2;my.x+=dx/d*speed*DT;my.y+=dy/d*speed*DT;col(my,14);if(Date.now()-lastPresenceAt>=80){lastPresenceAt=Date.now();R.presence({x:Math.round(my.x),y:Math.round(my.y)})}}
   }
   ui();draw();
   }catch(err){console.error(err)}
