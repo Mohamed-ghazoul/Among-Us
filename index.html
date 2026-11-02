@@ -179,6 +179,7 @@ button:disabled{filter:saturate(.3);opacity:.48}
 .menu-btn.danger{background:linear-gradient(180deg,#ff687b,#ba2e48)!important}
 .menu-code{margin-top:2px;direction:ltr;text-align:center;letter-spacing:5px;font-weight:900}
 .menu-message{display:block;min-height:18px;text-align:center;color:#85a9bf!important;font-size:11px!important}
+.diag-wrap{display:flex;flex-direction:column;align-items:center;gap:8px}.diag-btn{background:transparent;border:1px solid #42647d;color:#9fc2d6;border-radius:999px;padding:7px 16px;font:inherit;font-size:12px;font-weight:800;cursor:pointer}.diag-btn:disabled{opacity:.5;cursor:wait}.diag-out{display:none;width:100%;max-width:560px;margin:0;background:rgba(7,16,34,.8);border:1px solid #344766;border-radius:10px;padding:10px 12px;color:#e6efff;font:inherit;font-size:12px;line-height:1.8;text-align:right;white-space:pre-wrap}.diag-out.on{display:block}
 .menu-foot{text-align:center;color:#58768b;font-size:9px;letter-spacing:3px;font-weight:900;padding-top:2px}
 #ov.home-menu~*{direction:rtl}
 @media(max-width:900px){.menu-cards{grid-template-columns:repeat(2,minmax(0,1fr))}}
@@ -516,19 +517,29 @@ const ICE_SERVERS=[
 ];
 const PEER_OPTS={debug:0,config:{iceServers:ICE_SERVERS,iceCandidatePoolSize:4,sdpSemantics:'unified-plan'}};
 function startNet(host,code,ok,fail,peerId){
-  const H={ev:{},pc:[]},conns={},pres={};
+  const H={ev:{},pc:[]},conns={},pres={},lastSeen={};
   let myid=null,last=[],dirty=false,hc=null,pr=null,finished=false,timeout=null;
-  let attempts=0,welcome=false,retryTimer=null,connectedAt=0,wd=null,connTimer=null,lastErr='';
+  let attempts=0,welcome=false,retryTimer=null,connectedAt=0,wd=null,connTimer=null,lastErr='',pingT=null,lastPong=0,lostFired=false;
   const maxAttempts=String(peerId||'').startsWith('impostor-public-')?3:6;
   const target=peerId||('impostor-r-'+code);
   const roster=()=>Object.keys(pres).map(id=>({peer:id,presence:{...pres[id]}}));
   const cleanup=()=>{
-    clearTimeout(timeout);clearTimeout(retryTimer);clearTimeout(connTimer);clearInterval(wd);
+    clearTimeout(timeout);clearTimeout(retryTimer);clearTimeout(connTimer);clearInterval(wd);clearInterval(pingT);
     try{if(hc&&hc.open)hc.close()}catch(e){}
     try{if(pr&&!pr.destroyed)pr.destroy()}catch(e){}
   };
   const failOnce=e=>{if(finished)return;finished=true;cleanup();fail(e)};
-  const okOnce=()=>{if(finished||welcome)return;welcome=true;connectedAt=Date.now();clearTimeout(timeout);clearTimeout(connTimer);ok()};
+  const okOnce=()=>{if(finished||welcome)return;welcome=true;connectedAt=Date.now();clearTimeout(timeout);clearTimeout(connTimer);
+    if(!host){
+      lastPong=Date.now();
+      document.addEventListener('visibilitychange',()=>{if(document.visibilityState==='visible')lastPong=Date.now()});
+      pingT=setInterval(()=>{
+        if(finished)return;
+        if(hc&&hc.open){try{hc.send({t:'ping',ts:Date.now()})}catch(e){}}
+        if(document.visibilityState==='visible'&&Date.now()-lastPong>12000&&!lostFired){lostFired=true;$('st').textContent='انقطع الاتصال بالمضيف';if(net.lost)net.lost()}
+      },2500);
+    }
+    ok()};
   const fire=(t,d,from)=>(H.ev[t]||[]).forEach(f=>f({topic:t,data:d,peer:from,isMe:from===myid,sameTab:from===myid}));
   const setPeers=l=>{
     if(!Array.isArray(l))return;
@@ -570,6 +581,7 @@ function startNet(host,code,ok,fail,peerId){
       hc.on('open',()=>{try{hc.send({t:'hi'})}catch(e){}});
       hc.on('data',m=>{
         if(!m||typeof m!=='object')return;
+        if(m.t==='pong'){lastPong=Date.now();net.ping=Date.now()-m.ts;if(!finished&&welcome)$('st').textContent='متصل ✓ '+net.ping+'ms';return}
         if(m.t==='full'){failOnce('الغرفة ممتلئة أو بدأت المباراة بالفعل');return}
         if(m.t==='w'){setPeers(m.l||[]);okOnce();return}
         if(m.t==='l'){setPeers(m.l||[]);return}
@@ -608,7 +620,9 @@ function startNet(host,code,ok,fail,peerId){
       else if(attempts>=maxAttempts||e.type==='browser-incompatible'||e.type==='ssl-unavailable'||e.type==='invalid-id'||e.type==='invalid-key')failOnce('مشكلة بالاتصال، حاول مرة ثانية. ['+e.type+']');
     });
     pr.on('disconnected',()=>{if(finished||!pr||pr.destroyed)return;try{pr.reconnect()}catch(e){}});
-    wd=setInterval(()=>{if(finished||!pr||pr.destroyed)return;if(pr.disconnected){try{pr.reconnect()}catch(e){}}},5000);
+    wd=setInterval(()=>{if(finished||!pr||pr.destroyed)return;if(pr.disconnected){try{pr.reconnect()}catch(e){}}
+      if(host&&document.visibilityState==='visible'){const now=Date.now();Object.keys(conns).forEach(id=>{if(now-(lastSeen[id]||now)>30000){try{conns[id].close()}catch(e){}delete conns[id];delete pres[id];delete lastSeen[id];pub()}})}
+    },5000);
     pr.on('open',id=>{
       if(myid&&myid===id)return; /* إعادة اتصال بسيرفر الإشارة: لا تعيد تهيئة الغرفة */
       myid=id;
@@ -625,7 +639,7 @@ function startNet(host,code,ok,fail,peerId){
           const bid=Object.keys(pres).find(k=>pres[k]&&pres[k].bot);
           if(bid)delete pres[bid];else{full();return}
         }
-        admitted=true;conns[c.peer]=c;pres[c.peer]={};
+        admitted=true;conns[c.peer]=c;pres[c.peer]={};lastSeen[c.peer]=Date.now();
         try{c.send({t:'w',l:roster()})}catch(e){}
         pub();
       };
@@ -635,6 +649,8 @@ function startNet(host,code,ok,fail,peerId){
         if(m.t==='probe'){probe=true;const n=Object.keys(pres).length,started=!!(G&&G.phase!=='end');try{c.send({t:'info',n,full:started||n>=12})}catch(e){}setTimeout(()=>{try{c.close()}catch(_){}},300);return}
         if(m.t==='hi'){admit();return}
         if(!admitted)return;
+        lastSeen[c.peer]=Date.now();
+        if(m.t==='ping'){try{c.send({t:'pong',ts:m.ts})}catch(e){}return}
         if(m.t==='e')bc(m.k,m.d,c.peer);
         else if(m.t==='p')setP(c.peer,m.p);
       });
@@ -714,6 +730,37 @@ function scanPublicRooms(list,msg,nameInput){
   });
 }
 
+async function runNetDiag(out){
+  out.classList.add('on');const L=['⏳ جاري فحص الاتصال… (حتى 15 ثانية)'];out.textContent=L.join('\n');
+  const add=t=>{L.push(t);out.textContent=L.join('\n')};
+  if(typeof Peer==='undefined'){add('✗ مكتبة الاتصال (PeerJS) ما انحمّلت. غالباً الـ CDN محجوب، حدّث الصفحة أو جرّب شبكة تانية.');return}
+  add('✓ مكتبة الاتصال محمّلة');
+  const t0=Date.now();
+  const sig=await new Promise(res=>{let p,done=false,tm;const f=v=>{if(done)return;done=true;clearTimeout(tm);try{p&&p.destroy()}catch(e){}res(v)};tm=setTimeout(()=>f(null),8000);try{p=new Peer(undefined,PEER_OPTS);p.on('open',()=>f(Date.now()-t0));p.on('error',()=>f(null))}catch(e){f(null)}});
+  add(sig===null?'✗ ما قدرنا نوصل لسيرفر الإشارة (peerjs.com): الشبكة أو الـ DNS أو في حجب.':'✓ سيرفر الإشارة شغال ('+sig+'ms)');
+  if(!window.RTCPeerConnection){add('✗ المتصفح ما بيدعم WebRTC');return}
+  const cands=await new Promise(res=>{
+    const c=[];let pc,tm;const fin=()=>{clearTimeout(tm);try{pc.close()}catch(e){}res(c)};
+    try{pc=new RTCPeerConnection({iceServers:ICE_SERVERS})}catch(e){res(c);return}
+    tm=setTimeout(fin,9000);pc.createDataChannel('d');
+    pc.onicecandidate=e=>{if(!e.candidate)fin();else c.push(e.candidate.candidate||'')};
+    pc.createOffer().then(o=>pc.setLocalDescription(o)).catch(fin);
+  });
+  const P=cands.map(t=>{const m=/candidate:\S+ \d+ (\S+) \d+ (\S+) (\d+) typ (\w+)(?: raddr (\S+) rport (\d+))?/.exec(t);return m?{ip:m[2],port:+m[3],type:m[4],rport:m[6]}:null}).filter(Boolean);
+  const has=t=>P.some(x=>x.type===t),by={};
+  P.filter(x=>x.type==='srflx').forEach(x=>{(by[x.rport]=by[x.rport]||new Set()).add(x.port)});
+  const sym=Object.values(by).some(z=>z.size>1);
+  add(has('srflx')?'✓ STUN شغال (عنوانك الخارجي انكشف)':'✗ STUN ما رد: غالباً UDP محجوب عندك');
+  if(sym)add('⚠ نوع الـ NAT عندك صارم (Symmetric): الاتصال المباشر غالباً بيفشل وبيحتاج TURN');
+  add(has('relay')?'✓ TURN شغال (الاتصال بيقدر يمر عبر خادم وسيط)':'✗ TURN ما رد: بدونه ممكن يفشل الاتصال مع بعض الشبكات');
+  let v;
+  if(sig===null)v='❌ النتيجة: ما في وصول لخدمة الاتصال. غيّر الشبكة أو أطفئ الـ VPN.';
+  else if(has('relay'))v=(sym||!has('srflx'))?'🟠 النتيجة: الاتصال رح يمر عبر خادم وسيط (أبطأ شوي بس شغال).':'🟢 النتيجة: ممتاز، اتصالك جاهز.';
+  else if(has('srflx'))v=sym?'🔴 النتيجة: شبكتك صارمة وما في TURN رد: غالباً ما رح تتصل مع كل الناس.':'🟡 النتيجة: جيد، بس بدون TURN ممكن يفشل مع بعض الشبكات.';
+  else v='🔴 النتيجة: UDP محجوب ولا TURN رد. جرّب شبكة تانية (بيانات الموبايل أو واي فاي ثاني) أو أطفئ الـ VPN.';
+  add(v);add('كود التقرير: sig='+(sig===null?'x':sig)+'|srflx='+(has('srflx')?1:0)+'|relay='+(has('relay')?1:0)+'|sym='+(sym?1:0));
+}
+
 let hist=false;
 function askExit(){
   if(!R||$('exitDlg'))return;
@@ -752,7 +799,8 @@ function lobby(){
     TB.forEach((t,k)=>{const b=h('button',null,'menu-tab',()=>show(k)),ic=h('span',null,'tab-ic');ic.innerHTML=crewSVG(t[2],26);b.append(ic,h('b',t[0]),h('small',t[1]));tabs.append(b)});
     cards.append(...panels);show(tab);
     const fl=h('div',null,'menu-floaters');COL.slice(0,8).forEach((c,i)=>{const e=h('span');e.innerHTML=crewSVG(c,26+(i%3)*10);e.style.cssText='left:'+(4+i*12)+'%;top:'+((i*37)%78+4)+'%;animation-delay:-'+(i*2)+'s;animation-duration:'+(12+i*2)+'s';fl.append(e)});
-    shell.append(brand,intro,nameWrap,tabs,cards,h('div','IMPOSTOR  •  CREW VS IMPOSTOR','menu-foot'));ov.append(fl,shell);return;
+    const diagOut=h('pre',null,'diag-out'),diagWrap=h('div',null,'diag-wrap'),diagBtn=h('button','🔧 تشخيص الاتصال','diag-btn',()=>{diagBtn.disabled=true;runNetDiag(diagOut).catch(()=>{diagOut.textContent='صار خطأ أثناء الفحص'}).finally(()=>{diagBtn.disabled=false})});diagWrap.append(diagBtn,diagOut);
+    shell.append(brand,intro,nameWrap,tabs,cards,diagWrap,h('div','IMPOSTOR  •  CREW VS IMPOSTOR','menu-foot'));ov.append(fl,shell);return;
   }
   ov.className='lobbyscr';const l=h('div',null,'pl');named().forEach(p=>{const c=h('div',null,'chip');const d=h('span',null,'dot');d.className='';d.innerHTML=crewSVG(COL[p.presence.c||0],26);c.append(d,h('span',p.presence.n+(p.isMe?' (أنت)':'')));l.append(c)});
   ov.append(h('h2',room.startsWith('عامة')?'🌐 غرفة عامة':'🔒 غرفة خاصة'),h('p','كود الغرفة: '+room.replace('عامة ','').replace('PUBLIC-','')),h('small','شارك الكود مع أصدقائك'),h('p','اللاعبون: '+named().length+' / 12'),l);
@@ -1223,6 +1271,17 @@ function drawStatic(){
     cx.restore();
   });
 }
+const PARTS=[];let lastStep=0;const _seen={b:new Set(),d:new Set(),g:null};
+function burst(x,y,n,cols,sp,life,g){if(DT>1.9)return;for(let i=0;i<n&&PARTS.length<240;i++){const a=Math.random()*6.283,v=(.4+Math.random())*sp;PARTS.push({x,y,vx:Math.cos(a)*v,vy:Math.sin(a)*v,l:life*(.6+Math.random()*.6),m:life,c:cols[i%cols.length],s:2+Math.random()*3,g:g||0})}}
+function puff(x,y){if(DT>1.9||PARTS.length>240)return;PARTS.push({x:x+(Math.random()-.5)*8,y,vx:(Math.random()-.5)*.5,vy:-.25-Math.random()*.3,l:22,m:22,c:'rgba(205,220,235,.55)',s:3+Math.random()*2.5,g:0,d:1})}
+function drawParts(){for(let i=PARTS.length-1;i>=0;i--){const p=PARTS[i];p.l-=DT;if(p.l<=0){PARTS.splice(i,1);continue}p.x+=p.vx*DT;p.y+=p.vy*DT;p.vy+=p.g*DT;p.vx*=.97;const a=p.l/p.m;cx.globalAlpha=Math.min(1,a*1.4);cx.fillStyle=p.c;const r=p.d?p.s*(1.6-a*.6):p.s*a+1;cx.beginPath();cx.arc(p.x,p.y,r,0,6.283);cx.fill()}cx.globalAlpha=1}
+function trackFx(){
+  if(!G){_seen.b.clear();_seen.d.clear();_seen.g=null;return}
+  if(_seen.g!==G){_seen.g=G;_seen.b.clear();_seen.d.clear();G.bodies.forEach(b=>_seen.b.add(b.p));G.done.forEach(i=>_seen.d.add(i))}
+  G.bodies.forEach(b=>{if(!_seen.b.has(b.p)){_seen.b.add(b.p);burst(b.x,b.y,28,['#ff2a45','#ff7a5c','#8b0a1a'],3.6,34,.06)}});
+  G.done.forEach(i=>{if(!_seen.d.has(i)){_seen.d.add(i);const t=ST[i];if(t)burst(t[0],t[1],20,['#53e0a0','#ffd166','#ffffff'],2.8,42,-.02)}});
+  _seen.d.forEach(i=>{if(!G.done.has(i))_seen.d.delete(i)});
+}
 function draw(){
   drawBackdrop();
   const shx=shake>.4?(Math.random()-.5)*shake:0,shy=shake>.4?(Math.random()-.5)*shake:0;shake*=.88;
@@ -1238,10 +1297,14 @@ function draw(){
     G.bodies.forEach(b=>deadBody(b.x,b.y,colr(b.p)));
     const id=myId(),mr=G.roles[id];Object.keys(G.roles).forEach(p=>{const q=pos(p);if(!q)return;const gh=G.dead.has(p);if(gh&&!(p===id||dead))return;const isMe=p===id;if(isMe){q.x=my.x;q.y=my.y}
       cx.globalAlpha=gh?.38:1;const l=LP[p]||(LP[p]={x:q.x,y:q.y,f:1,w:0}),mv=Math.hypot(q.x-l.x,q.y-l.y);if(mv>.3){l.w+=mv*.28;if(Math.abs(q.x-l.x)>.2)l.f=q.x>l.x?1:-1}if(isMe){l.x=q.x;l.y=q.y}else{l.x+=(q.x-l.x)*.32;l.y+=(q.y-l.y)*.32}q.x=l.x;q.y=l.y;
+      if(isMe&&!gh&&mr==='i'&&Date.now()>=killCd){cx.strokeStyle='rgba(255,70,95,.26)';cx.lineWidth=1.5;cx.setLineDash([6,6]);cx.beginPath();cx.arc(q.x,q.y,70,0,6.283);cx.stroke();cx.setLineDash([])}
+      if(isMe&&!gh){const pu=.5+.5*Math.sin(Date.now()/420);cx.strokeStyle='rgba(120,220,255,'+(.32+pu*.28)+')';cx.lineWidth=2.5;cx.beginPath();cx.ellipse(q.x,q.y+19,24+pu*3,8+pu*1.2,0,0,6.28);cx.stroke()}
       cx.fillStyle='rgba(0,0,0,.36)';cx.beginPath();cx.ellipse(q.x,q.y+19,18,6,0,0,6.28);cx.fill();sprite(q.x,q.y,colr(p),l.f,mv>.3?l.w:0,gh);
-      cx.font='bold 12px system-ui';cx.textAlign='center';const label=nm(p)+(isMe?' ★':'');cx.lineJoin='round';cx.lineWidth=4;cx.strokeStyle='#000';cx.strokeText(label,q.x,q.y-31);cx.fillStyle=(mr==='i'&&G.roles[p]==='i')?'#ff2a2a':'#fff';cx.fillText(label,q.x,q.y-31);cx.globalAlpha=1;
+      if(!gh&&mv>.3){if(Math.random()<.18)puff(q.x,q.y+18);if(isMe&&Date.now()-lastStep>260){lastStep=Date.now();snd(70+Math.random()*25,.06,'triangle',.022)}}
+      cx.font='bold 12px system-ui';cx.textAlign='center';const label=nm(p)+(isMe?' ★':'');const tw=cx.measureText(label).width;cx.fillStyle='rgba(6,12,24,.62)';cx.beginPath();cx.roundRect(q.x-tw/2-7,q.y-45,tw+14,19,9.5);cx.fill();cx.lineJoin='round';cx.lineWidth=2.5;cx.strokeStyle='rgba(0,0,0,.8)';cx.strokeText(label,q.x,q.y-31);cx.fillStyle=(mr==='i'&&G.roles[p]==='i')?'#ff2a2a':'#fff';cx.fillText(label,q.x,q.y-31);cx.globalAlpha=1;
     });
   }
+  trackFx();drawParts();
   cx.restore();
   // Vision: when sabotage is active, crew members get a tight, dark visibility radius.
   // The impostor keeps normal vision. The mask is drawn in screen-space, centred on the local player.
